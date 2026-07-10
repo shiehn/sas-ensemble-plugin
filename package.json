@@ -1,0 +1,42 @@
+{
+  "name": "@signalsandsorcery/ensemble-generator",
+  "version": "1.0.0",
+  "description": "Ensemble arranger — one prompt becomes N jointly-composed counterpoint voices (register + complexity hierarchy, style packs: counterpoint / chorale / interlock), each on its own Surge XT track",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./plugin.json": "./plugin.json"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "jest",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "@signalsandsorcery/plugin-sdk": "file:../sas-plugin-sdk",
+    "@types/jest": "^29.5.14",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "jest": "^29.7.0",
+    "jest-environment-jsdom": "^29.7.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "ts-jest": "^29.1.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.3.0"
+  },
+  "peerDependencies": {
+    "@signalsandsorcery/plugin-sdk": "*",
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "license": "MIT"
+}
