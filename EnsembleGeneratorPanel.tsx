@@ -96,17 +96,24 @@ function EnsembleVoiceGroupRow({
   const allMuted = group.members.every((m) => m.track.runtimeState.muted);
   const anySolo = group.members.some((m) => m.track.runtimeState.solo);
   const isGenerating = group.members.some((m) => m.track.isGenerating);
+  const generateDisabled = isGenerating || !anchorTrack.prompt.trim();
 
   return (
-    <div style={{ border: '1px solid #8B5CF6', borderRadius: 8, marginBottom: 8, overflow: 'hidden' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', background: 'rgba(139, 92, 246, 0.12)' }}>
-        <span style={{ fontSize: 12, fontWeight: 700, color: '#A78BFA' }}>ENSEMBLE</span>
+    <div
+      data-testid={`ensemble-group-${group.groupId}`}
+      className="rounded-sm border border-sas-border bg-sas-panel-alt overflow-hidden"
+      style={{ borderLeftColor: '#8B5CF6', borderLeftWidth: '3px' }}
+    >
+      <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-sas-border">
+        <span className="text-[9px] uppercase tracking-wide text-sas-muted whitespace-nowrap">
+          Ensemble · {group.members.length} {group.members.length === 1 ? 'voice' : 'voices'}
+        </span>
         <input
           type="text"
           value={anchorTrack.prompt}
-          placeholder='e.g. "solemn rising passage, modern baroque"'
+          placeholder="Describe the ensemble…"
           onChange={(e) => ctx.handlers.promptChange(anchorTrack.handle.id, e.target.value)}
-          style={{ flex: 1, minWidth: 80, fontSize: 12, padding: '4px 6px', borderRadius: 4, border: '1px solid #4B5563', background: '#111827', color: '#E5E7EB' }}
+          className="flex-1 min-w-0 bg-sas-panel border border-sas-border rounded-sm px-2 py-0.5 text-xs text-sas-text placeholder:text-sas-muted/50 focus:border-sas-accent focus:outline-none"
           data-testid="ensemble-group-prompt"
         />
         <select
@@ -117,7 +124,7 @@ function EnsembleVoiceGroupRow({
             persistConfig({ voiceCount: next, style });
           }}
           title="Voices"
-          style={{ fontSize: 12 }}
+          className="text-xs bg-sas-panel border border-sas-border rounded-sm px-1 py-0.5 text-sas-text"
           data-testid="ensemble-voice-count"
         >
           {Array.from({ length: ENSEMBLE_MAX_VOICES - ENSEMBLE_MIN_VOICES + 1 }, (_, i) => ENSEMBLE_MIN_VOICES + i).map((n) => (
@@ -132,7 +139,7 @@ function EnsembleVoiceGroupRow({
             persistConfig({ voiceCount, style: next });
           }}
           title="Style"
-          style={{ fontSize: 12 }}
+          className="text-xs bg-sas-panel border border-sas-border rounded-sm px-1 py-0.5 text-sas-text"
           data-testid="ensemble-style"
         >
           {ENSEMBLE_STYLES.map((s) => (
@@ -141,23 +148,63 @@ function EnsembleVoiceGroupRow({
         </select>
         <button
           onClick={() => ctx.handlers.generate(anchorTrack.handle.id)}
-          disabled={isGenerating}
+          disabled={generateDisabled}
           title="Regenerate the whole ensemble"
-          style={{ fontSize: 12 }}
+          className={`px-2 py-0.5 text-[10px] font-medium rounded-sm border transition-colors ${
+            generateDisabled
+              ? 'bg-sas-panel border-sas-border text-sas-muted/50 cursor-not-allowed'
+              : 'bg-sas-accent/10 border-sas-accent/30 text-sas-accent hover:bg-sas-accent/20'
+          }`}
           data-testid="ensemble-generate"
         >
-          {isGenerating ? '…' : 'Generate'}
+          {isGenerating ? 'Generating…' : 'Generate'}
         </button>
-        <button onClick={() => ctx.setGroupMute(memberEngineIds, !allMuted)} title="Mute group" style={{ fontSize: 12, opacity: allMuted ? 1 : 0.6 }}>M</button>
-        <button onClick={() => ctx.setGroupSolo(memberEngineIds, !anySolo)} title="Solo group" style={{ fontSize: 12, opacity: anySolo ? 1 : 0.6 }}>S</button>
-        <button onClick={() => setConfirmDelete(true)} title="Delete ensemble" style={{ fontSize: 12 }}>✕</button>
+        <button
+          onClick={() => ctx.setGroupMute(memberEngineIds, !allMuted)}
+          title="Mute group"
+          className={`px-1.5 py-0.5 text-[10px] font-bold rounded-sm border transition-colors ${
+            allMuted
+              ? 'bg-red-500/20 border-red-500/40 text-red-400'
+              : 'bg-sas-panel border-sas-border text-sas-muted hover:border-sas-accent'
+          }`}
+        >
+          M
+        </button>
+        <button
+          onClick={() => ctx.setGroupSolo(memberEngineIds, !anySolo)}
+          title="Solo group"
+          className={`px-1.5 py-0.5 text-[10px] font-bold rounded-sm border transition-colors ${
+            anySolo
+              ? 'bg-yellow-500/20 border-yellow-500/40 text-yellow-400'
+              : 'bg-sas-panel border-sas-border text-sas-muted hover:border-sas-accent'
+          }`}
+        >
+          S
+        </button>
+        <button
+          onClick={() => setConfirmDelete(true)}
+          title="Delete ensemble"
+          className="px-1.5 py-0.5 text-[10px] rounded-sm border border-sas-border text-sas-muted hover:border-red-500/60 hover:text-red-400 transition-colors"
+        >
+          ✕
+        </button>
       </div>
 
-      {group.members.map((m) => (
-        <React.Fragment key={m.track.handle.id}>
-          {ctx.renderDefaultTrackRow(m.track)}
-        </React.Fragment>
-      ))}
+      <div className="p-1 space-y-1">
+        {group.members.map((m) =>
+          ctx.renderDefaultTrackRow(m.track, {
+            // The prompt field shows the MECHANICAL voice label ("countermelody",
+            // "bassline"); the ensemble intent lives on the group header (the
+            // anchor's prompt key). Voice count is owned by the header dropdown,
+            // so per-voice generate/delete/copy are off (the group owns those).
+            prompt: m.meta.label || 'ensemble voice',
+            onPromptChange: undefined,
+            onGenerate: undefined,
+            onCopy: undefined,
+            onDelete: undefined,
+          }),
+        )}
+      </div>
 
       {confirmDelete && (
         <ConfirmDialog
