@@ -281,7 +281,12 @@ export async function generateEnsemble(
       const member = memberByBucket.get(i)!;
       if (!member.isNew) continue;
       try {
-        const result = await host.shufflePreset(member.engineId, appliedNames);
+        // Semantic retrieval: the ensemble prompt plus this voice's character
+        // label ("horn section — high florid line") so each voice draws a
+        // register-appropriate patch instead of a random category pick.
+        const result = await host.shufflePreset(member.engineId, appliedNames, {
+          description: `${prompt} — ${filled[i].spec.label}`,
+        });
         appliedNames.push(result.presetName);
       } catch {
         /* non-fatal — default patch */
