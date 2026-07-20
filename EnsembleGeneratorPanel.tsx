@@ -27,6 +27,7 @@ import {
   createSurgeSoundAdapter,
   ConfirmDialog,
   parseLLMNoteResponse,
+  promptEnterToGenerate,
   defaultVoiceSpecs,
   buildEnsembleSystemPrompt,
   ENSEMBLE_MIN_VOICES,
@@ -48,6 +49,7 @@ import {
   DEFAULT_VOICE_COUNT,
   DEFAULT_STYLE,
 } from './src/ensemble-generation';
+import { prepareVoiceRemoval } from './src/remove-voice';
 
 const ESTIMATED_GENERATION_MS = 30000; // one joint call + a possible guided retry
 
@@ -85,7 +87,9 @@ function EnsembleVoiceGroupRow({
       }
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [host, scene, configKey]);
+    // members.length: a per-voice delete rewrites the stored config (count
+    // shrink) — re-sync the header controls when the group's shape changes.
+  }, [host, scene, configKey, group.members.length]);
 
   const persistConfig = (next: { voiceCount: number; style: EnsembleStyle }): void => {
     if (!scene) return;
@@ -97,6 +101,33 @@ function EnsembleVoiceGroupRow({
   const anySolo = group.members.some((m) => m.track.runtimeState.solo);
   const isGenerating = group.members.some((m) => m.track.isGenerating);
   const generateDisabled = isGenerating || !anchorTrack.prompt.trim();
+
+  // Per-voice delete (TrackRow's own ConfirmDialog gates the click): scene-data
+  // surgery first — config shrink, anchor handoff when voice 0 goes — then the
+  // track + key scrub. Abort on surgery failure so the group is never left
+  // half-re-pointed with the voice already gone.
+  const handleVoiceDelete = (member: (typeof group.members)[number]): void => {
+    void (async () => {
+      try {
+        if (scene) {
+          await prepareVoiceRemoval({
+            host,
+            sceneId: scene,
+            keyFor: ctx.services.trackDataKey,
+            members: group.members.map((gm) => ({ dbId: gm.dbId, meta: gm.meta })),
+            deletedDbId: member.dbId,
+          });
+        }
+      } catch (err) {
+        host.showToast('error', 'Failed to delete voice', err instanceof Error ? err.message : String(err));
+        return;
+      }
+      await ctx.deleteGroup(
+        [{ engineId: member.track.handle.id, dbId: member.dbId }],
+        [ENSEMBLE_VOICE_META_KEY, ENSEMBLE_CONFIG_KEY, 'prompt', 'soundHistory', 'role'],
+      );
+    })();
+  };
 
   return (
     <div
@@ -113,6 +144,10 @@ function EnsembleVoiceGroupRow({
           value={anchorTrack.prompt}
           placeholder="Describe the ensemble…"
           onChange={(e) => ctx.handlers.promptChange(anchorTrack.handle.id, e.target.value)}
+          onKeyDown={promptEnterToGenerate(
+            () => ctx.handlers.generate(anchorTrack.handle.id),
+            generateDisabled
+          )}
           className="flex-1 min-w-0 bg-sas-panel border border-sas-border rounded-sm px-2 py-0.5 text-xs text-sas-text placeholder:text-sas-muted/50 focus:border-sas-accent focus:outline-none"
           data-testid="ensemble-group-prompt"
         />
@@ -195,13 +230,14 @@ function EnsembleVoiceGroupRow({
           ctx.renderDefaultTrackRow(m.track, {
             // The prompt field shows the MECHANICAL voice label ("countermelody",
             // "bassline"); the ensemble intent lives on the group header (the
-            // anchor's prompt key). Voice count is owned by the header dropdown,
-            // so per-voice generate/delete/copy are off (the group owns those).
+            // anchor's prompt key). Per-voice generate/copy are off (the group
+            // owns those). Delete IS per-voice: it shrinks the group (and the
+            // stored voice count) instead of regenerating.
             prompt: m.meta.label || 'ensemble voice',
             onPromptChange: undefined,
             onGenerate: undefined,
             onCopy: undefined,
-            onDelete: undefined,
+            onDelete: () => handleVoiceDelete(m),
           }),
         )}
       </div>
