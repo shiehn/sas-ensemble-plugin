@@ -68,7 +68,10 @@ describe('parsePromptHints', () => {
     expect(parsePromptHints('a solemn 4-voice passage')).toEqual({ voiceCount: 4 });
     expect(parsePromptHints('3 part chorale for evening')).toEqual({ voiceCount: 3, style: 'chorale' });
     expect(parsePromptHints('minimal interlock, 6 lines')).toEqual({ voiceCount: 6, style: 'interlock' });
-    expect(parsePromptHints('misty strings')).toEqual({});
+    // Since the instrumentation axis, 'strings' is a recognized family word
+    // (same outcome as before — strings IS the default mode).
+    expect(parsePromptHints('misty strings')).toEqual({ instrumentation: 'strings' });
+    expect(parsePromptHints('misty evening texture')).toEqual({});
   });
 });
 

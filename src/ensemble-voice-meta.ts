@@ -8,6 +8,7 @@
 
 import type {
   GroupParseSpec,
+  PluginHost,
   ResolvedTrackGroup,
   GeneratorTrackState,
 } from '@signalsandsorcery/plugin-sdk';
@@ -52,6 +53,29 @@ export function ensembleGroupIsComplete(
   return group.members.some((m) => m.meta.voiceIndex === 0);
 }
 
+/**
+ * Stamp a NEWBORN track as a voice-group of ONE (anchor, voiceIndex 0) so
+ * the group header — with its instrumentation/style/voices controls —
+ * exists BEFORE the first generation instead of appearing only after it
+ * (pre-fix, the first generate ran blind on defaults/hints and was a
+ * throwaway). The arp plugin's `stampArpAnchor` pattern, verbatim; wired
+ * via the panel-core's `onTrackCreated` adapter hook.
+ *
+ * The CONFIG is deliberately NOT stamped: generation resolves
+ * stored > prompt hints > defaults, so pre-writing defaults would silently
+ * override hints like "3-voice horn stabs". The header persists config only
+ * when the user touches a control — explicit beats hints beats defaults.
+ */
+export async function stampEnsembleAnchor(
+  host: Pick<PluginHost, 'setSceneData'>,
+  sceneId: string,
+  keyFor: (dbId: string, suffix: string) => string,
+  dbId: string,
+): Promise<void> {
+  const meta: EnsembleVoiceMeta = { groupId: dbId, voiceIndex: 0, label: 'ensemble voice', role: '' };
+  await host.setSceneData(sceneId, keyFor(dbId, ENSEMBLE_VOICE_META_KEY), meta);
+}
+
 // --- reconcile planner (pure; the bass plugin's shape) ---
 
 export interface ReconcileMember {
@@ -93,25 +117,66 @@ export function planReconcile(existing: ReconcileMember[], bucketCount: number):
 export interface EnsembleConfig {
   voiceCount: number;
   style: string;
+  /**
+   * Parent mode ('strings' | 'horns' | 'winds'). Optional because
+   * pre-instrumentation groups stored only {voiceCount, style} — absent
+   * reads as 'strings' (the historical behavior).
+   */
+  instrumentation?: string;
+  /**
+   * 🔗 Apply All: preset-level sound changes (shuffle / History restore /
+   * Import) on ANY voice propagate the same sound to every voice, and
+   * regeneration keeps all voices on the group's shared sound. Absent =
+   * false (the historical per-voice behavior).
+   */
+  linkSounds?: boolean;
 }
 
 export function asEnsembleConfig(val: unknown): EnsembleConfig | null {
   if (!val || typeof val !== 'object') return null;
   const c = val as Partial<EnsembleConfig>;
   if (typeof c.voiceCount !== 'number' || typeof c.style !== 'string') return null;
-  return { voiceCount: c.voiceCount, style: c.style };
+  const config: EnsembleConfig = { voiceCount: c.voiceCount, style: c.style };
+  if (typeof c.instrumentation === 'string') config.instrumentation = c.instrumentation;
+  if (typeof c.linkSounds === 'boolean') config.linkSounds = c.linkSounds;
+  return config;
 }
 
 /**
- * Deterministic prompt hints for the FIRST generate (before the group header
- * with its explicit controls exists): "4 voices" / "3-part" sets the count,
- * a literal style word sets the style. Explicit config always wins.
+ * Deterministic prompt hints for the FIRST generate (before the user has
+ * touched the header controls): "4 voices" / "3-part" sets the count, a
+ * literal style word sets the style, and instrument-family words set the
+ * parent instrumentation. "french horn" is claimed by WINDS before the
+ * generic horn test runs (a french horn is a wind-family voice here, per
+ * the mode design). Explicit config always wins.
  */
-export function parsePromptHints(prompt: string): { voiceCount?: number; style?: string } {
-  const hints: { voiceCount?: number; style?: string } = {};
-  const count = /(\d+)\s*[- ]?\s*(?:voice|part|line)s?\b/i.exec(prompt);
+export function parsePromptHints(prompt: string): {
+  voiceCount?: number;
+  style?: string;
+  instrumentation?: string;
+} {
+  const hints: { voiceCount?: number; style?: string; instrumentation?: string } = {};
+  const count = /(\d+)\s*[- ]?\s*(?:voice|part|line|horn|player)s?\b/i.exec(prompt);
   if (count) hints.voiceCount = parseInt(count[1], 10);
-  const style = /\b(counterpoint|chorale|interlock)\b/i.exec(prompt);
-  if (style) hints.style = style[1].toLowerCase();
+  const style = /\b(counterpoint|chorale|interlock|stabs?|riffs?|unison)\b/i.exec(prompt);
+  if (style) {
+    const raw = style[1].toLowerCase();
+    hints.style = raw === 'stab' ? 'stabs' : raw === 'riff' ? 'riffs' : raw;
+  }
+  // Family words — the french-horn carve-out must run before the horn test.
+  const withoutFrenchHorns = prompt.replace(/\bfrench\s+horns?\b/gi, ' FRENCHHORN ');
+  if (/FRENCHHORN/.test(withoutFrenchHorns) && !/\b(brass|trumpets?|sax(?:es|ophones?)?|trombones?)\b/i.test(prompt)) {
+    hints.instrumentation = 'winds';
+  } else if (/\b(horns?|brass|trumpets?|sax(?:es|ophones?)?|trombones?)\b/i.test(withoutFrenchHorns)) {
+    hints.instrumentation = 'horns';
+  } else if (/\b(winds?|woodwinds?|flutes?|clarinets?|oboes?|bassoons?)\b/i.test(prompt)) {
+    hints.instrumentation = 'winds';
+  } else if (/\b(strings?|violins?|violas?|cellos?)\b/i.test(prompt)) {
+    hints.instrumentation = 'strings';
+  }
+  // A section-only style word ("stabs") is itself a horn signal.
+  if (!hints.instrumentation && (hints.style === 'stabs' || hints.style === 'riffs' || hints.style === 'unison')) {
+    hints.instrumentation = 'horns';
+  }
   return hints;
 }

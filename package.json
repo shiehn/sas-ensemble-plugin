@@ -1,6 +1,6 @@
 {
   "name": "@signalsandsorcery/ensemble-generator",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Ensemble arranger — one prompt becomes N jointly-composed counterpoint voices (register + complexity hierarchy, style packs: counterpoint / chorale / interlock), each on its own Surge XT track",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",

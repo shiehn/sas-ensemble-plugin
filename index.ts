@@ -23,7 +23,7 @@ import manifest from './plugin.json';
 class EnsembleGeneratorPlugin implements GeneratorPlugin {
   readonly id = '@signalsandsorcery/ensemble-generator';
   readonly displayName = 'Ensemble';
-  readonly version = '1.0.0';
+  readonly version = '1.2.0';
   readonly description =
     'Ensemble arranger — one prompt becomes 2-6 jointly-composed counterpoint voices (register + complexity hierarchy, style packs: counterpoint / chorale / interlock), each on its own Surge XT track';
   readonly generatorType = 'midi' as const;

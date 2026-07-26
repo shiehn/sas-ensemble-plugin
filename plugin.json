@@ -1,8 +1,8 @@
 {
   "id": "@signalsandsorcery/ensemble-generator",
   "displayName": "Ensemble",
-  "version": "1.0.0",
-  "description": "Ensemble arranger: describe one passage; the LLM composes 2-6 voices TOGETHER (one schema-forced call) with a register + complexity hierarchy — top voice highest and most florid, bottom voice a sparse root anchor — then a mechanical validator enforces registers, density caps, per-voice monophony, and style rules (counterpoint / chorale / interlock). Each voice lands on its own Surge XT track as one voice-group.",
+  "version": "1.2.0",
+  "description": "Ensemble arranger: pick an instrumentation — Strings, Horns, or Winds — and describe one passage; the LLM composes 2-6 voices TOGETHER (one schema-forced call). Strings/winds follow woven rules (counterpoint / chorale / interlock, register + complexity hierarchy); Horns are a funk SECTION (stabs / riffs / unison — one rhythm under the lead, James Brown punches, dance-floor bias). A mechanical validator enforces registers, density caps, per-voice monophony, stab length, and style rules. Each voice lands on its own track as one voice-group, with a category-correct placeholder sound (roles strings/brass/winds) and real-instrument registers ready for sampled libraries.",
   "generatorType": "midi",
   "main": "index.js",
   "minHostVersion": "1.0.0",

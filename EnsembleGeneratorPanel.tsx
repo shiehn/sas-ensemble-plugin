@@ -2,13 +2,19 @@
  * Ensemble panel — a thin GeneratorPanelAdapter over the SDK panel-core
  * (the bass plugin's container with a different brain). One voice-group per
  * ensemble: the anchor (voice 0) carries the prompt; the group header adds
- * the two explicit intent controls the bass panel doesn't need — voice
- * count (2-6) and style (counterpoint / chorale / interlock) — persisted in
- * scene-data under the anchor (`track:<anchorDbId>:ensembleConfig`).
+ * the three explicit intent controls — INSTRUMENTATION (Strings / Horns /
+ * Winds, the parent mode), style (gated by the parent: woven trio for
+ * strings/winds, section trio for horns), and voice count (2-6) — persisted
+ * in scene-data under the anchor (`track:<anchorDbId>:ensembleConfig`).
  *
- * Per-voice sound choice stays mechanical: each voice's role (lead /
- * strings / bass / 808s) + its actual register drive shufflePreset's
- * category pick, exactly like every other generator.
+ * Newborn tracks are stamped as a voice-group of ONE (`onTrackCreated`, the
+ * arp plugin's pattern) so all three controls exist BEFORE the first
+ * expensive generation — never config-by-regeneration.
+ *
+ * Per-voice sound choice stays mechanical and category-level: each voice's
+ * role ('strings' / 'brass' / 'winds' / …) + its actual register drive
+ * shufflePreset's pick. Surge XT is a placeholder — users re-target sampled
+ * libraries, which is why specs carry real instrument registers.
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
@@ -26,13 +32,18 @@ import {
   useGeneratorPanelCore,
   createSurgeSoundAdapter,
   ConfirmDialog,
+  GroupCollapseChevron,
   parseLLMNoteResponse,
   promptEnterToGenerate,
   defaultVoiceSpecs,
   buildEnsembleSystemPrompt,
   ENSEMBLE_MIN_VOICES,
   ENSEMBLE_MAX_VOICES,
-  ENSEMBLE_STYLES,
+  ENSEMBLE_INSTRUMENTATIONS,
+  STYLES_FOR_INSTRUMENTATION,
+  normalizeInstrumentation,
+  styleForInstrumentation,
+  type EnsembleInstrumentation,
   type EnsembleStyle,
 } from '@signalsandsorcery/plugin-sdk';
 import {
@@ -41,6 +52,7 @@ import {
   asEnsembleConfig,
   ensembleGroupIsComplete,
   ensembleVoiceGroupSpec,
+  stampEnsembleAnchor,
   type EnsembleVoiceMeta,
 } from './src/ensemble-voice-meta';
 import {
@@ -54,7 +66,8 @@ import { prepareVoiceRemoval } from './src/remove-voice';
 const ESTIMATED_GENERATION_MS = 30000; // one joint call + a possible guided retry
 
 // ============================================================================
-// Group row — header (prompt + voices + style + Generate + M/S/✕), voice rows
+// Group row — header (prompt + instrumentation + style + voices + Generate +
+// M/S/✕), voice rows
 // ============================================================================
 
 function EnsembleVoiceGroupRow({
@@ -70,8 +83,10 @@ function EnsembleVoiceGroupRow({
   const host = ctx.services.host;
   const configKey = ctx.services.trackDataKey(anchor.dbId, ENSEMBLE_CONFIG_KEY);
 
+  const [instrumentation, setInstrumentation] = useState<EnsembleInstrumentation>('strings');
   const [voiceCount, setVoiceCount] = useState<number>(DEFAULT_VOICE_COUNT);
   const [style, setStyle] = useState<EnsembleStyle>(DEFAULT_STYLE);
+  const [linkSounds, setLinkSounds] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   useEffect(() => {
@@ -80,10 +95,13 @@ function EnsembleVoiceGroupRow({
     void host.getSceneData(scene, configKey).then((raw) => {
       const cfg = asEnsembleConfig(raw);
       if (cfg && !cancelled) {
+        // Instrumentation first: the style domain depends on it (absent on
+        // pre-instrumentation configs → 'strings', the historical behavior).
+        const instr = normalizeInstrumentation(cfg.instrumentation);
+        setInstrumentation(instr);
         setVoiceCount(Math.max(ENSEMBLE_MIN_VOICES, Math.min(ENSEMBLE_MAX_VOICES, cfg.voiceCount)));
-        if ((ENSEMBLE_STYLES as readonly string[]).includes(cfg.style)) {
-          setStyle(cfg.style as EnsembleStyle);
-        }
+        setStyle(styleForInstrumentation(instr, cfg.style));
+        setLinkSounds(cfg.linkSounds === true);
       }
     }).catch(() => {});
     return () => { cancelled = true; };
@@ -91,7 +109,12 @@ function EnsembleVoiceGroupRow({
     // shrink) — re-sync the header controls when the group's shape changes.
   }, [host, scene, configKey, group.members.length]);
 
-  const persistConfig = (next: { voiceCount: number; style: EnsembleStyle }): void => {
+  const persistConfig = (next: {
+    voiceCount: number;
+    style: EnsembleStyle;
+    instrumentation: EnsembleInstrumentation;
+    linkSounds: boolean;
+  }): void => {
     if (!scene) return;
     void host.setSceneData(scene, configKey, next).catch(() => {});
   };
@@ -124,7 +147,7 @@ function EnsembleVoiceGroupRow({
       }
       await ctx.deleteGroup(
         [{ engineId: member.track.handle.id, dbId: member.dbId }],
-        [ENSEMBLE_VOICE_META_KEY, ENSEMBLE_CONFIG_KEY, 'prompt', 'soundHistory', 'role'],
+        [ENSEMBLE_VOICE_META_KEY, ENSEMBLE_CONFIG_KEY, 'prompt', 'soundHistory', 'role', 'groupUi'],
       );
     })();
   };
@@ -136,6 +159,7 @@ function EnsembleVoiceGroupRow({
       style={{ borderLeftColor: '#8B5CF6', borderLeftWidth: '3px' }}
     >
       <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-sas-border">
+        <GroupCollapseChevron collapsed={ctx.collapsed} onToggle={ctx.onToggleCollapse} what="ensemble" />
         <span className="text-[9px] uppercase tracking-wide text-sas-muted whitespace-nowrap">
           Ensemble · {group.members.length} {group.members.length === 1 ? 'voice' : 'voices'}
         </span>
@@ -152,11 +176,46 @@ function EnsembleVoiceGroupRow({
           data-testid="ensemble-group-prompt"
         />
         <select
+          value={instrumentation}
+          onChange={(e) => {
+            const next = normalizeInstrumentation(e.target.value);
+            // Keep the style when the new parent also offers it
+            // (strings ↔ winds); otherwise fall to the parent's default
+            // (horns → stabs) — never a style the mode can't honor.
+            const nextStyle = styleForInstrumentation(next, style);
+            setInstrumentation(next);
+            setStyle(nextStyle);
+            persistConfig({ voiceCount, style: nextStyle, instrumentation: next, linkSounds });
+          }}
+          title="Instrumentation — picks the voice registers, roles and rule family; the style menu follows it"
+          className="text-xs bg-sas-panel border border-sas-border rounded-sm px-1 py-0.5 text-sas-text"
+          data-testid="ensemble-instrumentation"
+        >
+          {ENSEMBLE_INSTRUMENTATIONS.map((m) => (
+            <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1)}</option>
+          ))}
+        </select>
+        <select
+          value={style}
+          onChange={(e) => {
+            const next = e.target.value as EnsembleStyle;
+            setStyle(next);
+            persistConfig({ voiceCount, style: next, instrumentation, linkSounds });
+          }}
+          title="Style"
+          className="text-xs bg-sas-panel border border-sas-border rounded-sm px-1 py-0.5 text-sas-text"
+          data-testid="ensemble-style"
+        >
+          {STYLES_FOR_INSTRUMENTATION[instrumentation].map((s) => (
+            <option key={s} value={s}>{s}</option>
+          ))}
+        </select>
+        <select
           value={voiceCount}
           onChange={(e) => {
             const next = parseInt(e.target.value, 10);
             setVoiceCount(next);
-            persistConfig({ voiceCount: next, style });
+            persistConfig({ voiceCount: next, style, instrumentation, linkSounds });
           }}
           title="Voices"
           className="text-xs bg-sas-panel border border-sas-border rounded-sm px-1 py-0.5 text-sas-text"
@@ -166,21 +225,26 @@ function EnsembleVoiceGroupRow({
             <option key={n} value={n}>{n} voices</option>
           ))}
         </select>
-        <select
-          value={style}
-          onChange={(e) => {
-            const next = e.target.value as EnsembleStyle;
-            setStyle(next);
-            persistConfig({ voiceCount, style: next });
+        <button
+          onClick={() => {
+            const next = !linkSounds;
+            setLinkSounds(next);
+            persistConfig({ voiceCount, style, instrumentation, linkSounds: next });
           }}
-          title="Style"
-          className="text-xs bg-sas-panel border border-sas-border rounded-sm px-1 py-0.5 text-sas-text"
-          data-testid="ensemble-style"
+          title={
+            linkSounds
+              ? 'Apply All is ON — Shuffle, History restore and Import on any voice apply the same sound to every voice'
+              : 'Apply All — apply sound changes (Shuffle / History / Import) on any voice to all voices together'
+          }
+          className={`px-1.5 py-0.5 text-[10px] font-bold rounded-sm border transition-colors whitespace-nowrap ${
+            linkSounds
+              ? 'bg-sas-accent/20 border-sas-accent text-sas-accent'
+              : 'bg-sas-panel border-sas-border text-sas-muted hover:border-sas-accent'
+          }`}
+          data-testid="ensemble-link-sounds"
         >
-          {ENSEMBLE_STYLES.map((s) => (
-            <option key={s} value={s}>{s}</option>
-          ))}
-        </select>
+          🔗 All
+        </button>
         <button
           onClick={() => ctx.handlers.generate(anchorTrack.handle.id)}
           disabled={generateDisabled}
@@ -225,22 +289,28 @@ function EnsembleVoiceGroupRow({
         </button>
       </div>
 
-      <div className="p-1 space-y-1">
-        {group.members.map((m) =>
-          ctx.renderDefaultTrackRow(m.track, {
-            // The prompt field shows the MECHANICAL voice label ("countermelody",
-            // "bassline"); the ensemble intent lives on the group header (the
-            // anchor's prompt key). Per-voice generate/copy are off (the group
-            // owns those). Delete IS per-voice: it shrinks the group (and the
-            // stored voice count) instead of regenerating.
-            prompt: m.meta.label || 'ensemble voice',
-            onPromptChange: undefined,
-            onGenerate: undefined,
-            onCopy: undefined,
-            onDelete: () => handleVoiceDelete(m),
-          }),
-        )}
-      </div>
+      {!ctx.collapsed && (
+        <div className="p-1 space-y-1">
+          {group.members.map((m) =>
+            ctx.renderDefaultTrackRow(m.track, {
+              // The prompt field shows the MECHANICAL voice label ("countermelody",
+              // "bassline"); the ensemble intent lives on the group header (the
+              // anchor's prompt key). Per-voice generate/copy are off (the group
+              // owns those). Delete IS per-voice: it shrinks the group (and the
+              // stored voice count) instead of regenerating.
+              prompt: m.meta.label || 'ensemble voice',
+              onPromptChange: undefined,
+              onGenerate: undefined,
+              onCopy: undefined,
+              onDelete: () => handleVoiceDelete(m),
+              linkedSoundHint:
+                linkSounds && group.members.length > 1
+                  ? `🔗 Sound changes apply to all ${group.members.length} parts`
+                  : undefined,
+            }),
+          )}
+        </div>
+      )}
 
       {confirmDelete && (
         <ConfirmDialog
@@ -252,7 +322,7 @@ function EnsembleVoiceGroupRow({
             setConfirmDelete(false);
             void ctx.deleteGroup(
               group.members.map((m) => ({ engineId: m.track.handle.id, dbId: m.dbId })),
-              [ENSEMBLE_VOICE_META_KEY, ENSEMBLE_CONFIG_KEY, 'prompt', 'soundHistory', 'role'],
+              [ENSEMBLE_VOICE_META_KEY, ENSEMBLE_CONFIG_KEY, 'prompt', 'soundHistory', 'role', 'groupUi'],
             );
           }}
           onCancel={() => setConfirmDelete(false)}
@@ -296,12 +366,41 @@ function createEnsembleGeneratorAdapter(host: PluginHost): GeneratorPanelAdapter
         /* non-fatal */
       }
     },
+    // Every newborn track is anchored as a voice-group of ONE so the header
+    // controls (instrumentation / style / voices) are visible BEFORE the
+    // first generation — configure first, generate once (the arp pattern).
+    onTrackCreated: async (handle, ctx) => {
+      await stampEnsembleAnchor(host, ctx.activeSceneId, ctx.trackDataKey, handle.dbId);
+    },
     // The core's generic path wants a system prompt; the real generation goes
     // through generateEnsemble (schema-forced tools call), so this is only a
     // sane fallback shape.
     buildSystemPrompt: () => buildEnsembleSystemPrompt(defaultVoiceSpecs(DEFAULT_VOICE_COUNT), DEFAULT_STYLE),
     parseNotesResponse: parseLLMNoteResponse,
-    sound: surgeSound,
+    sound: {
+      ...surgeSound,
+      // 🔗 Apply All: ALL linked siblings of a voice, or null when the
+      // group's toggle is OFF / the track is loose. The core filters per
+      // broadcast kind (preset blobs go only to same-instrument siblings;
+      // Pick-tab instrument swaps go to everyone).
+      broadcastTargets: async (track, services) => {
+        const scene = services.activeSceneId;
+        if (!scene) return null;
+        const groups = services.resolvedGroups<EnsembleVoiceMeta>(ENSEMBLE_VOICE_META_KEY);
+        const group = groups.find((g) => g.members.some((m) => m.dbId === track.handle.dbId));
+        if (!group || group.members.length < 2) return null;
+        const anchor = group.members.find((m) => m.meta.voiceIndex === 0) ?? group.members[0];
+        const raw = await host
+          .getSceneData(scene, services.trackDataKey(anchor.dbId, ENSEMBLE_CONFIG_KEY))
+          .catch(() => null);
+        if (asEnsembleConfig(raw)?.linkSounds !== true) return null;
+        return group.members.map((m) => ({
+          engineId: m.track.handle.id,
+          dbId: m.dbId,
+          label: m.meta.label || m.track.handle.name,
+        }));
+      },
+    },
     shuffle: {
       shuffle: async (track, excludeNames) => {
         const result = await host.shufflePreset(track.handle.id, excludeNames, {

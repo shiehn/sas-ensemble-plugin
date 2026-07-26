@@ -5,9 +5,15 @@
  * (host.generateWithLLMTools, mode 'ANY', submit_ensemble tool), then the
  * ensemble-core mechanical layer enforces the hard contract per voice
  * (register fold, root-only anchor, in-scale snap, per-voice monophony,
- * density caps) and the soft cross-voice rules are analyzed; violations
- * earn ONE guided retry (quota-conscious), keeping whichever attempt scores
- * better.
+ * density caps, stab-length ceiling) and the soft cross-voice rules are
+ * analyzed; violations earn ONE guided retry (quota-conscious), keeping
+ * whichever attempt scores better.
+ *
+ * The INSTRUMENTATION axis (strings / horns / winds — ensemble-core's
+ * instrumentation.ts) picks the voice-spec table, the rule family (woven
+ * vs section), and the style list; per-voice roles ('strings' / 'brass' /
+ * 'winds' / …) come from the specs and are category-level only — Surge XT
+ * is a placeholder sound, so registers are real instrument ranges.
  *
  * Track lifecycle follows the bass plugin verbatim: positional reconcile
  * (reused voices KEEP the user's presets), clips written before presets,
@@ -41,7 +47,9 @@ import {
   ENSEMBLE_MIN_VOICES,
   ENSEMBLE_MAX_VOICES,
   STYLE_RULES,
-  ENSEMBLE_STYLES,
+  normalizeInstrumentation,
+  styleForInstrumentation,
+  type EnsembleInstrumentation,
   type EnsembleNote,
   type EnsembleStyle,
   type EnsembleVoiceSpec,
@@ -96,15 +104,21 @@ export async function generateEnsemble(
     .catch(() => null);
   const stored = asEnsembleConfig(storedRaw);
   const hints = parsePromptHints(anchorPrompt);
-  const styleRaw = stored?.style ?? hints.style ?? DEFAULT_STYLE;
-  const style: EnsembleStyle = (ENSEMBLE_STYLES as readonly string[]).includes(styleRaw)
-    ? (styleRaw as EnsembleStyle)
-    : DEFAULT_STYLE;
+  const instrumentation: EnsembleInstrumentation = normalizeInstrumentation(
+    stored?.instrumentation ?? hints.instrumentation
+  );
+  // styleForInstrumentation clamps into the mode's own list — a group
+  // switched to Horns with 'counterpoint' still stored lands on 'stabs',
+  // never on a style the mode can't honor.
+  const style: EnsembleStyle = styleForInstrumentation(
+    instrumentation,
+    stored?.style ?? hints.style ?? null
+  );
   const voiceCount = Math.max(
     ENSEMBLE_MIN_VOICES,
     Math.min(ENSEMBLE_MAX_VOICES, stored?.voiceCount ?? hints.voiceCount ?? DEFAULT_VOICE_COUNT)
   );
-  const specs = defaultVoiceSpecs(voiceCount);
+  const specs = defaultVoiceSpecs(voiceCount, instrumentation);
 
   // ── musical + sibling context (tools path has NO auto-prefix) ─────────
   const musical = await host.getMusicalContext();
@@ -139,7 +153,7 @@ export async function generateEnsemble(
     musical.contractPrompt ? `- Scene Contract: ${musical.contractPrompt}` : null,
   ].filter(Boolean).join('\n');
 
-  const systemPrompt = buildEnsembleSystemPrompt(specs, style);
+  const systemPrompt = buildEnsembleSystemPrompt(specs, style, instrumentation);
   const baseUser = `${contextText}\n\n${concurrentBlock ? `${concurrentBlock}\n\n` : ''}User request: "${anchorPrompt}"`;
 
   // ── the joint call (+ at most ONE guided retry) ────────────────────────
@@ -183,6 +197,9 @@ export async function generateEnsemble(
         chordRootPcAtBar,
         chordPcsAtBar,
         scalePcs,
+        // Stab styles carry a mechanical duration ceiling — a punch must
+        // not come back from the model as a pad.
+        maxNoteDurationBeats: STYLE_RULES[style].maxNoteDurationBeats,
       })
     );
 
@@ -275,21 +292,50 @@ export async function generateEnsemble(
       }
     }
 
-    // Presets for NEW voices only — reused voices keep the user's pick.
-    const appliedNames: string[] = [];
-    for (let i = 0; i < filled.length; i++) {
-      const member = memberByBucket.get(i)!;
-      if (!member.isNew) continue;
-      try {
-        // Semantic retrieval: the ensemble prompt plus this voice's character
-        // label ("horn section — high florid line") so each voice draws a
-        // register-appropriate patch instead of a random category pick.
-        const result = await host.shufflePreset(member.engineId, appliedNames, {
-          description: `${prompt} — ${filled[i].spec.label}`,
-        });
-        appliedNames.push(result.presetName);
-      } catch {
-        /* non-fatal — default patch */
+    // Presets: 🔗 Apply All groups share ONE sound; otherwise per-voice shuffle.
+    const linkSounds = stored?.linkSounds === true;
+    if (linkSounds && services.sound && host.getTrackSound) {
+      // Every voice carries the group's shared sound — the anchor's durable
+      // identity. First-ever generation (no persisted anchor preset yet):
+      // shuffle the ANCHOR once (the host persists it), then copy to the rest.
+      let snap = await host.getTrackSound(anchorDbId).catch(() => null);
+      if (!snap || snap.kind !== 'preset') {
+        try {
+          await host.shufflePreset(anchorTrack.handle.id, [], { description: prompt });
+          snap = await host.getTrackSound(anchorDbId).catch(() => null);
+        } catch {
+          /* non-fatal — voices fall back to default patches */
+        }
+      }
+      if (snap && snap.kind === 'preset') {
+        for (let i = 0; i < filled.length; i++) {
+          const member = memberByBucket.get(i)!;
+          // Reused voices keep their sound — it IS the shared sound.
+          if (!member.isNew) continue;
+          try {
+            await services.sound.copySnapshot(member.engineId, snap);
+          } catch {
+            /* non-fatal — default patch */
+          }
+        }
+      }
+    } else {
+      // Presets for NEW voices only — reused voices keep the user's pick.
+      const appliedNames: string[] = [];
+      for (let i = 0; i < filled.length; i++) {
+        const member = memberByBucket.get(i)!;
+        if (!member.isNew) continue;
+        try {
+          // Semantic retrieval: the ensemble prompt plus this voice's character
+          // label ("horn section — high florid line") so each voice draws a
+          // register-appropriate patch instead of a random category pick.
+          const result = await host.shufflePreset(member.engineId, appliedNames, {
+            description: `${prompt} — ${filled[i].spec.label}`,
+          });
+          appliedNames.push(result.presetName);
+        } catch {
+          /* non-fatal — default patch */
+        }
       }
     }
 
@@ -307,6 +353,10 @@ export async function generateEnsemble(
     await host.setSceneData(scene, services.trackDataKey(anchorDbId, ENSEMBLE_CONFIG_KEY), {
       voiceCount,
       style,
+      instrumentation,
+      // Carry 🔗 Apply All through the rewrite — the validator strips unknown
+      // fields, so dropping it here would silently turn the toggle off.
+      ...(stored?.linkSounds === undefined ? {} : { linkSounds: stored.linkSounds }),
     });
 
     // Surplus voices: delete track + its group/soundHistory keys.
@@ -350,7 +400,7 @@ export async function generateEnsemble(
   host.showToast(
     'success',
     'Ensemble generated',
-    `${filled.length} voice${filled.length === 1 ? '' : 's'} · ${style}` +
+    `${filled.length} voice${filled.length === 1 ? '' : 's'} · ${instrumentation} · ${style}` +
       (violations.length > 0 ? ` · ${violations.length} soft rule note(s)` : '')
   );
   await services.reloadTracks(true);
