@@ -307,6 +307,12 @@ function EnsembleVoiceGroupRow({
                 linkSounds && group.members.length > 1
                   ? `🔗 Sound changes apply to all ${group.members.length} parts`
                   : undefined,
+              // One-shot sync — the only propagation control that works for
+              // patches picked inside a custom plugin's own editor.
+              onSyncSoundToGroup:
+                linkSounds && group.members.length > 1
+                  ? () => ctx.handlers.syncSoundToGroup(m.track.handle.id)
+                  : undefined,
             }),
           )}
         </div>
