@@ -36,13 +36,15 @@ import type {
 import {
   formatConcurrentTracks,
   defaultVoiceSpecs,
-  enforceVoice,
   analyzeEnsemble,
   describeViolations,
-  buildEnsembleSystemPrompt,
   buildViolationRetrySuffix,
   buildSubmitEnsembleParameters,
   parseEnsembleArgs,
+  panelClipEndSeconds,
+  panelMeter,
+  panelQuarterNotesPerBar,
+  parseTimeSignature,
   SUBMIT_ENSEMBLE_TOOL_NAME,
   ENSEMBLE_MIN_VOICES,
   ENSEMBLE_MAX_VOICES,
@@ -55,6 +57,7 @@ import {
   type EnsembleVoiceSpec,
   type ParsedEnsemble,
 } from '@signalsandsorcery/plugin-sdk';
+import { buildEnsembleSystemPromptWithMeter, enforceVoiceMetered } from './ensemble-meter';
 import {
   ENSEMBLE_CONFIG_KEY,
   ENSEMBLE_VOICE_META_KEY,
@@ -124,6 +127,13 @@ export async function generateEnsemble(
   const musical = await host.getMusicalContext();
   const bars = musical.bars > 0 ? musical.bars : 4;
   const bpm = musical.bpm > 0 ? musical.bpm : 120;
+  // Scene meter (P8b): '4/4' for absent/malformed values — every derived
+  // number below then reproduces the legacy 4/4 arithmetic exactly.
+  const meter = panelMeter(musical);
+  const qnPerBar = panelQuarterNotesPerBar(musical);
+  // panelMeter guarantees parseability; qnPerSlot drives the density
+  // tie-break's beat grid (1 for /4 meters, 0.5 for /8).
+  const qnPerSlot = parseTimeSignature(meter).qnPerSlot;
 
   let concurrentBlock = '';
   try {
@@ -147,13 +157,17 @@ export async function generateEnsemble(
     'Musical Context:',
     `- Key: ${musical.key} ${musical.mode}`,
     `- BPM: ${bpm}`,
-    `- Bars: ${bars} (clip = ${bars * 4} quarter-note beats)`,
+    // 4/4 renders `bars * 4` exactly (byte-identity); the meter line only
+    // appears on non-4/4 scenes.
+    `- Bars: ${bars} (clip = ${bars * qnPerBar} quarter-note beats)`,
+    meter !== '4/4' ? `- Time signature: ${meter} (each bar = ${qnPerBar} quarter notes)` : null,
     musical.genre ? `- Genre: ${musical.genre}` : null,
     `- Chord Progression: ${chordText}`,
     musical.contractPrompt ? `- Scene Contract: ${musical.contractPrompt}` : null,
   ].filter(Boolean).join('\n');
 
-  const systemPrompt = buildEnsembleSystemPrompt(specs, style, instrumentation);
+  // 4/4 = the SDK prompt byte-identical; other meters append family rules.
+  const systemPrompt = buildEnsembleSystemPromptWithMeter(specs, style, instrumentation, meter);
   const baseUser = `${contextText}\n\n${concurrentBlock ? `${concurrentBlock}\n\n` : ''}User request: "${anchorPrompt}"`;
 
   // ── the joint call (+ at most ONE guided retry) ────────────────────────
@@ -189,10 +203,11 @@ export async function generateEnsemble(
   };
 
   const scalePcs = scalePcsFor(musical.key, musical.mode) ?? undefined;
-  const { chordRootPcAtBar, chordPcsAtBar } = chordLookupsFromTiming(musical.chordProgression);
-  const enforceAll = (parsed: ParsedEnsemble): ReturnType<typeof enforceVoice>[] =>
+  // Bar windows in the scene meter (4/4 = the legacy bar*4 grid).
+  const { chordRootPcAtBar, chordPcsAtBar } = chordLookupsFromTiming(musical.chordProgression, meter);
+  const enforceAll = (parsed: ParsedEnsemble): ReturnType<typeof enforceVoiceMetered>[] =>
     specs.map((spec) =>
-      enforceVoice(parsed.voiceNotes[spec.voiceIndex] ?? [], spec, {
+      enforceVoiceMetered(parsed.voiceNotes[spec.voiceIndex] ?? [], spec, {
         bars,
         chordRootPcAtBar,
         chordPcsAtBar,
@@ -200,6 +215,8 @@ export async function generateEnsemble(
         // Stab styles carry a mechanical duration ceiling — a punch must
         // not come back from the model as a pad.
         maxNoteDurationBeats: STYLE_RULES[style].maxNoteDurationBeats,
+        quarterNotesPerBar: qnPerBar,
+        quarterNotesPerSlot: qnPerSlot,
       })
     );
 
@@ -251,10 +268,10 @@ export async function generateEnsemble(
     );
   }
 
-  const secondsPerBeat = 60 / bpm;
   const clipFor = (notes: EnsembleNote[]): MidiClipData => ({
     startTime: 0,
-    endTime: bars * 4 * secondsPerBeat,
+    // Scene-loop span in the scene meter (4/4 = the legacy bars*4*60/bpm).
+    endTime: panelClipEndSeconds({ bars, bpm, timeSignature: meter }),
     tempo: bpm,
     notes: notes.map((n) => ({
       pitch: n.pitch,
@@ -395,6 +412,7 @@ export async function generateEnsemble(
     editNotes: clipFor(filled[0].notes).notes,
     editBars: bars,
     editBpm: bpm,
+    editBeatsPerBar: qnPerBar,
   }));
   services.markEditLoaded(anchorTrack.handle.id);
   host.showToast(
