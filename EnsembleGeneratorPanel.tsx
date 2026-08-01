@@ -363,6 +363,12 @@ function createEnsembleGeneratorAdapter(host: PluginHost): GeneratorPanelAdapter
       exportMidi: true,
       transitionDesigner: false,
       importTracks: false,
+      // Bus-strip DSP clusters (DUCK + WOB): kick-derived sidechain pump
+      // (ghost grids work with no kicks) and tempo-locked motion — filter
+      // wobble, amp gate/tremolo, auto-pan. Rendered per-sample in the
+      // engine, identical live and bounced.
+      busSidechain: true,
+      busMotion: true,
     },
     createTrackOptions: () => ({ loadSynth: true, synthName: 'Surge XT' }),
     applyPortedTrackSound: async (handle: PluginTrackHandle) => {
