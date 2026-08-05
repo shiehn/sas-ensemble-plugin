@@ -339,6 +339,16 @@ export async function generateEnsemble(
     } else {
       // Presets for NEW voices only — reused voices keep the user's pick.
       const appliedNames: string[] = [];
+      // Each voice retrieves on its OWN description, so each would otherwise
+      // pay a separate embed round-trip inside shufflePreset — serialized
+      // behind the per-plugin lock. One batched call warms them all.
+      await host
+        .prewarmPresetDescriptions?.(
+          filled
+            .filter((_, i) => memberByBucket.get(i)?.isNew)
+            .map((v) => `${prompt} — ${v.spec.label}`)
+        )
+        .catch(() => {});
       for (let i = 0; i < filled.length; i++) {
         const member = memberByBucket.get(i)!;
         if (!member.isNew) continue;
