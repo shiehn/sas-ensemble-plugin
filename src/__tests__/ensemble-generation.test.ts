@@ -216,6 +216,27 @@ describe('generateEnsemble', () => {
     expect(h.calls.filter(c => c.startsWith('createFamilyTrack'))).toHaveLength(0);
   });
 
+  it('names truncation for what it is when the model exhausts its output budget', async () => {
+    // 3.x Pro draws thinking from `maxOutputTokens`, so a hard counterpoint
+    // problem can burn the whole pool and get cut off with NO functionCall
+    // part. That is not "the model declined" — and it is not something
+    // rephrasing fixes, which is what the generic message used to claim.
+    const truncated = { candidates: [{ content: { role: 'model', parts: [] }, finishReason: 'MAX_TOKENS' }] };
+    const h = makeHarness({ llmResults: [truncated] });
+    await expect(generateEnsemble(h.track, h.services)).rejects.toThrow(/entire \d+-token budget/);
+    await expect(generateEnsemble(h.track, h.services)).rejects.toThrow(/rephrasing won't help/);
+    // Truncation is caught before any track work — nothing to roll back.
+    expect(h.calls.filter(c => c.startsWith('createFamilyTrack'))).toHaveLength(0);
+  });
+
+  it('still reports a plain no-tool-call response as unusable, not as truncation', async () => {
+    // Model replied without calling the tool and WITHOUT hitting the cap —
+    // the pre-existing "try rephrasing" path, which stays intact.
+    const prose = { candidates: [{ content: { role: 'model', parts: [{ text: 'I think A minor is nice.' }] }, finishReason: 'STOP' }] };
+    const h = makeHarness({ llmResults: [prose] });
+    await expect(generateEnsemble(h.track, h.services)).rejects.toThrow(/no usable ensemble/);
+  });
+
   it('rolls back created tracks LIFO when a clip write fails', async () => {
     const h = makeHarness({ failClipWrite: true });
     await expect(generateEnsemble(h.track, h.services)).rejects.toThrow('engine says no');

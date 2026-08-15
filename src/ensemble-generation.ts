@@ -74,7 +74,23 @@ export const DEFAULT_VOICE_COUNT = 5;
 export const DEFAULT_STYLE: EnsembleStyle = 'counterpoint';
 /** The generation model — tools-capable; matches the platform's BEST tier. */
 export const ENSEMBLE_MODEL = 'gemini-3.1-pro-preview';
-export const ENSEMBLE_MAX_OUTPUT_TOKENS = 16384;
+/**
+ * Output budget for the joint call.
+ *
+ * This pool is SHARED with the model's thinking tokens — on 3.x Pro, dynamic
+ * thinking is drawn from `maxOutputTokens`, not from a separate allowance. The
+ * original 16384 was sized for the note JSON alone, so a hard counterpoint
+ * problem could spend the whole budget deliberating and get cut off
+ * (`finishReason: MAX_TOKENS`) before it ever emitted the `submit_ensemble`
+ * call — 8 of 8 attempts in one 2026-08-15 session, every one of them a
+ * 80-108s round-trip that produced nothing.
+ *
+ * Raising the ceiling does NOT raise the spend on calls that were already
+ * succeeding: thinking stays dynamic and uses what the problem needs. It only
+ * stops the truncation. Keep it well clear of the note JSON (~6k for 6 voices)
+ * plus the deliberation that N-voice counterpoint actually warrants.
+ */
+export const ENSEMBLE_MAX_OUTPUT_TOKENS = 49152;
 export const ENSEMBLE_TEMPERATURE = 0.85;
 
 interface FilledVoice {
@@ -198,6 +214,16 @@ export async function generateEnsemble(
           return parseEnsembleArgs(part.functionCall.args, voiceCount);
         }
       }
+    }
+    // Truncation is a STRUCTURAL signal the host already carries — read it
+    // rather than lumping it in with "the model declined". The two failures
+    // need opposite responses from the user, so telling a truncated run to
+    // "try rephrasing" sends them chasing a prompt that was never the problem.
+    if (response.candidates?.some((c) => c.finishReason === 'MAX_TOKENS')) {
+      throw new Error(
+        `The model used its entire ${ENSEMBLE_MAX_OUTPUT_TOKENS}-token budget before submitting the ` +
+          `ensemble. Try fewer voices or a shorter scene — rephrasing won't help.`
+      );
     }
     return null;
   };
